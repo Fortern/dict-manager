@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"dict-manager/model"
+	"dict-manager/store"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,24 +15,15 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type Word struct {
-	ID        int       `json:"id"`
-	Word      string    `json:"word"`
-	Reading   string    `json:"reading"`
-	Category  int       `json:"category"`
-	Weight    int       `json:"weight"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
+const currentSchemaVer = 100
 
 func initDB(db *sql.DB) error {
-	currentSchemaVer := 100
 	// 1. 创建架构信息表
 	schemaMeta := `CREATE TABLE IF NOT EXISTS schema_meta (
-    	id INTEGER PRIMARY KEY AUTOINCREMENT,
-    	name TEXT NOT NULL UNIQUE,
-    	value INTEGER NOT NULL,
-    	applied_at DATETIME DEFAULT (datetime('now'))
+    		id INTEGER PRIMARY KEY AUTOINCREMENT,
+    		name TEXT NOT NULL UNIQUE,
+    		value INTEGER NOT NULL,
+    		applied_at INTEGER DEFAULT (unixepoch())
     );`
 	_, err := db.Exec(schemaMeta)
 	if err != nil {
@@ -65,7 +58,7 @@ func createSchema(db *sql.DB, currentVer int) error {
 		return txErr
 	}
 	defer func(tx *sql.Tx) {
-		if tx != nil && txErr != nil {
+		if txErr != nil {
 			if err := tx.Rollback(); err != nil {
 				slog.Error("Rollback failed: %v", err)
 			}
@@ -80,25 +73,28 @@ func createSchema(db *sql.DB, currentVer int) error {
 	// 并创建表
 	// 创建 words 表
 	createTable := `CREATE TABLE IF NOT EXISTS words (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		word TEXT NOT NULL UNIQUE,
-		reading TEXT NOT NULL,
-		weight INTEGER NOT NULL DEFAULT 999,
-		created_at DATETIME NOT NULL
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			word TEXT NOT NULL UNIQUE,
+			reading TEXT NOT NULL,
+			weight INTEGER NOT NULL DEFAULT 10,
+			category INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
 	);`
 	if _, txErr = tx.Exec(createTable); txErr != nil {
 		return txErr
 	}
-	return tx.Commit()
+	txErr = tx.Commit()
+	return txErr
 }
 
 func updateSchema(db *sql.DB, verInDB int, currentVer int) error {
-	if verInDB == currentVer {
-		return nil
-	}
 	tx, txErr := db.Begin()
+	if txErr != nil {
+		return txErr
+	}
 	defer func(tx *sql.Tx) {
-		if tx != nil && txErr != nil {
+		if txErr != nil {
 			if err := tx.Rollback(); err != nil {
 				slog.Error("Rollback failed: %v", err)
 			}
@@ -111,7 +107,8 @@ func updateSchema(db *sql.DB, verInDB int, currentVer int) error {
 		return txErr
 	}
 	// 更新架构的SQL操作，以后可能会有
-	return tx.Commit()
+	txErr = tx.Commit()
+	return txErr
 }
 
 func getDB(c *gin.Context) *sql.DB {
@@ -121,7 +118,10 @@ func getDB(c *gin.Context) *sql.DB {
 
 func listWordsHandler(c *gin.Context) {
 	db := getDB(c)
-	rows, err := db.Query("SELECT id , word, reading, weight, created_at, updateed_at FROM words ORDER BY weight DESC, id ASC")
+	selectWord := `SELECT id, word, reading, weight, created_at, updated_at
+			FROM words
+			ORDER BY weight DESC, id;`
+	rows, err := db.Query(selectWord)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -132,9 +132,9 @@ func listWordsHandler(c *gin.Context) {
 			slog.Error("Rows close failed: %v", err)
 		}
 	}(rows)
-	var res []Word
+	var res []model.CnWord
 	for rows.Next() {
-		var w Word
+		var w model.CnWord
 		var created sql.NullString
 		if err := rows.Scan(&w.ID, &w.Word, &w.Reading, &w.Weight, &created); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -150,30 +150,36 @@ func listWordsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-func addWordHandler(c *gin.Context) {
-	db := getDB(c)
-	var req struct {
-		Word    string `json:"word" binding:"required"`
-		Reading string `json:"reading"`
-		Weight  int    `json:"weight"`
+func addWordsHandler(c *gin.Context) {
+	dictName := c.Param("dict_name")
+	dictName = model.GetDictName(dictName)
+	if dictName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		return
 	}
-	if err := c.BindJSON(&req); err != nil {
+	var request []model.WordItem
+	if err := c.BindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Weight <= 0 {
-		req.Weight = 1
+	var errorWords []string
+	var err error
+	if dictName == "cn_words" {
+		errorWords, err = store.UpsertCnWords(getDB(c), request)
+	} else if dictName == "en_words" {
+		errorWords, err = store.UpsertEnWords(getDB(c), request)
+	} else if dictName == "phrases" {
+		errorWords, err = store.UpsertPhrases(getDB(c), request)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		return
 	}
-	now := time.Now().Format(time.RFC3339)
-	// upsert by word
-	stmt := `INSERT INTO words(word,reading,weight,created_at) VALUES(?,?,?,?) ON CONFLICT(word) DO UPDATE SET reading=excluded.reading, weight=excluded.weight`
-	res, err := db.Exec(stmt, req.Word, req.Reading, req.Weight, now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	id, _ := res.LastInsertId()
-	c.JSON(http.StatusOK, gin.H{"id": id})
+	c.JSON(http.StatusOK, gin.H{"error_words": errorWords})
+	return
 }
 
 func deleteWordHandler(c *gin.Context) {
@@ -233,18 +239,18 @@ func exportHandler(c *gin.Context) {
 func main() {
 	db, err := sql.Open("sqlite3", "dict.db")
 	if err != nil {
-		slog.Error("open sqlite db error", "msg", err)
+		slog.Error("open sqlite store error", "msg", err)
 		return
 	}
 	defer func(db *sql.DB) {
-		err := db.Close()
-		if err != nil {
-			slog.Error("Error closing sqlite db.", "msg", err)
+		e := db.Close()
+		if e != nil {
+			slog.Error("Error closing sqlite store.", "msg", err)
 		}
 	}(db)
 
-	if err := initDB(db); err != nil {
-		slog.Error("init db error.", "msg", err)
+	if err = store.InitSchema(db); err != nil {
+		slog.Error("init store error.", "msg", err)
 		return
 	}
 
@@ -258,12 +264,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
 
-	api := router.Group("/dict")
+	api := router.Group("/dicts")
 	{
 		api.GET("/words", listWordsHandler)
 		api.GET("/export", exportHandler)
-		// mutating endpoints require token auth
-		api.POST("/words", addWordHandler)
+		api.POST("/dict/:dict_name", addWordsHandler)
 		api.DELETE("/words/:id", deleteWordHandler)
 	}
 
