@@ -68,3 +68,12 @@ func GetDictName(name string) string {
 	}
 	return ""
 }
+
+func GetCategories() map[int]string {
+	// 都怪 Go 不提供只读 Map
+	m := make(map[int]string, len(categories))
+	for k, v := range categories {
+		m[k] = v
+	}
+	return m
+}

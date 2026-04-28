@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -85,12 +86,6 @@ const upsertPhrase = `
 		SET reading=excluded.reading, category=excluded.category, updated_at=excluded.updated_at;
 `
 
-const selectCnWordsByCategory = `
-	SELECT id, word, reading, weight, category, created_at, updated_at
-		FROM cn_words
-		WHERE category = ?;
-`
-
 const selectEnWordsByCategory = `
 	SELECT id, word, reading, category, created_at, updated_at
 		FROM en_words
@@ -102,6 +97,12 @@ const selectPhrasesByCategory = `
 		FROM phrases
 		WHERE category = ?;
 `
+
+const deleteFromCnWords = `DELETE FROM cn_words WHERE id = ?;`
+
+const deleteFromEnWords = `DELETE FROM en_words WHERE id = ?;`
+
+const deleteFromPhrases = `DELETE FROM phrases WHERE id = ?;`
 
 func InitSchema(db *sql.DB) error {
 	// 1. 创建架构信息表
@@ -156,7 +157,7 @@ func UpsertCnWords(db *sql.DB, words []model.WordItem) ([]string, error) {
 		defer func(statement *sql.Stmt) {
 			if txErr != nil {
 				if err := statement.Close(); err != nil {
-					slog.Error("Statement.Close failed: %v", err)
+					slog.Error("Statement.Close failed.", "msg", err)
 				}
 			}
 		}(statement)
@@ -173,7 +174,7 @@ func UpsertCnWords(db *sql.DB, words []model.WordItem) ([]string, error) {
 			}
 			// 没有批处理？
 			if _, err := statement.Exec(text, reading, word.Weight, word.Category, now, now); err != nil {
-				slog.Error("Exec failed: %v", err)
+				slog.Error("Exec failed.", "msg", err)
 			}
 		}
 		return nil
@@ -191,7 +192,7 @@ func UpsertEnWords(db *sql.DB, words []model.WordItem) ([]string, error) {
 		defer func(statement *sql.Stmt) {
 			if txErr != nil {
 				if err := statement.Close(); err != nil {
-					slog.Error("Statement.Close failed: %v", err)
+					slog.Error("Statement.Close failed.", "msg", err)
 				}
 			}
 		}(statement)
@@ -204,7 +205,7 @@ func UpsertEnWords(db *sql.DB, words []model.WordItem) ([]string, error) {
 				continue
 			}
 			if _, err := statement.Exec(text, reading, word.Category, now, now); err != nil {
-				slog.Error("Exec failed: %v", err)
+				slog.Error("Exec failed.", "msg", err)
 			}
 		}
 		return nil
@@ -222,7 +223,7 @@ func UpsertPhrases(db *sql.DB, words []model.WordItem) ([]string, error) {
 		defer func(statement *sql.Stmt) {
 			if txErr != nil {
 				if err := statement.Close(); err != nil {
-					slog.Error("Statement.Close failed: %v", err)
+					slog.Error("Statement.Close failed.", "msg", err)
 				}
 			}
 		}(statement)
@@ -235,7 +236,7 @@ func UpsertPhrases(db *sql.DB, words []model.WordItem) ([]string, error) {
 				continue
 			}
 			if _, err := statement.Exec(text, reading, word.Category, now, now); err != nil {
-				slog.Error("Exec failed: %v", err)
+				slog.Error("Exec failed.", "msg", err)
 			}
 		}
 		return nil
@@ -243,11 +244,109 @@ func UpsertPhrases(db *sql.DB, words []model.WordItem) ([]string, error) {
 	return errWords, err
 }
 
-func getCnWords(db *sql.DB) error {
-	return withTx(db, func(tx *sql.Tx) error {
-
-		return nil
+func GetCnWords(db *sql.DB, categories []int) ([]model.CnWord, error) {
+	cnWords := make([]model.CnWord, 0)
+	err := withTx(db, func(tx *sql.Tx) error {
+		selectCnWords := "SELECT id, word, reading, weight, category, created_at, updated_at FROM cn_words"
+		if len(categories) > 0 {
+			selectCnWords += " WHERE category IN (" + strings.Join(intsToStrings(categories), ",") + ");"
+		} else {
+			selectCnWords += ";"
+		}
+		rows, txErr := tx.Query(selectCnWords)
+		if txErr != nil {
+			return txErr
+		}
+		for rows.Next() {
+			var cnWord model.CnWord
+			var createdAt int64
+			var updatedAt int64
+			if e := rows.Scan(&cnWord.ID, &cnWord.Word, &cnWord.Reading, &cnWord.Weight, &cnWord.Category, &createdAt, &updatedAt); e != nil {
+				slog.Error("rows.Scan failed", "msg", e)
+				continue
+			}
+			cnWord.CreatedAt = time.Unix(createdAt, 0)
+			cnWord.UpdatedAt = time.Unix(updatedAt, 0)
+			cnWords = append(cnWords, cnWord)
+		}
+		return rows.Err()
 	})
+	return cnWords, err
+}
+
+func GetEnWords(db *sql.DB, categories []int) ([]model.EnWord, error) {
+	enWords := make([]model.EnWord, 0)
+	err := withTx(db, func(tx *sql.Tx) error {
+		selectEnWords := "SELECT id, word, reading, category, created_at, updated_at FROM en_words"
+		if len(categories) > 0 {
+			selectEnWords += " WHERE category IN (" + strings.Join(intsToStrings(categories), ",") + ");"
+		} else {
+			selectEnWords += ";"
+		}
+		rows, txErr := tx.Query(selectEnWords)
+		if txErr != nil {
+			return txErr
+		}
+		for rows.Next() {
+			var enWord model.EnWord
+			var createdAt int64
+			var updatedAt int64
+			if e := rows.Scan(&enWord.ID, &enWord.Word, &enWord.Reading, &enWord.Category, &createdAt, &updatedAt); e != nil {
+				slog.Error("rows.Scan failed", "msg", e)
+				continue
+			}
+			enWord.CreatedAt = time.Unix(createdAt, 0)
+			enWord.UpdatedAt = time.Unix(updatedAt, 0)
+			enWords = append(enWords, enWord)
+		}
+		return rows.Err()
+	})
+	return enWords, err
+}
+
+func GetPhrases(db *sql.DB, categories []int) ([]model.Phrase, error) {
+	phrases := make([]model.Phrase, 0)
+	err := withTx(db, func(tx *sql.Tx) error {
+		selectPhrases := "SELECT id, word, reading, category, created_at, updated_at FROM phrases"
+		if len(categories) > 0 {
+			selectPhrases += " WHERE category IN (" + strings.Join(intsToStrings(categories), ",") + ");"
+		} else {
+			selectPhrases += ";"
+		}
+		rows, txErr := tx.Query(selectPhrases)
+		if txErr != nil {
+			return txErr
+		}
+		for rows.Next() {
+			var phrase model.Phrase
+			var createdAt int64
+			var updatedAt int64
+			if e := rows.Scan(&phrase.ID, &phrase.Word, &phrase.Abbr, &phrase.Category, &createdAt, &updatedAt); e != nil {
+				slog.Error("rows.Scan failed", "msg", e)
+				continue
+			}
+			phrase.CreatedAt = time.Unix(createdAt, 0)
+			phrase.UpdatedAt = time.Unix(updatedAt, 0)
+			phrases = append(phrases, phrase)
+		}
+		return rows.Err()
+	})
+	return phrases, err
+}
+
+func DeleteFromCnWordsById(db *sql.DB, id int) error {
+	_, err := db.Exec(deleteFromCnWords, id)
+	return err
+}
+
+func DeleteFromEnWordsById(db *sql.DB, id int) error {
+	_, err := db.Exec(deleteFromEnWords, id)
+	return err
+}
+
+func DeleteFromPhrasesById(db *sql.DB, id int) error {
+	_, err := db.Exec(deleteFromPhrases, id)
+	return err
 }
 
 func withTx(db *sql.DB, fn func(*sql.Tx) error) (err error) {
@@ -259,7 +358,7 @@ func withTx(db *sql.DB, fn func(*sql.Tx) error) (err error) {
 	defer func(tx *sql.Tx) {
 		if txErr != nil {
 			if e := tx.Rollback(); e != nil {
-				slog.Error("Rollback failed: %v", e)
+				slog.Error("Rollback failed.", "msg", e)
 			}
 		}
 	}(tx)
@@ -274,4 +373,12 @@ func withTx(db *sql.DB, fn func(*sql.Tx) error) (err error) {
 		return fmt.Errorf("commit tx: %w", txErr)
 	}
 	return nil
+}
+
+func intsToStrings(ints []int) []string {
+	strs := make([]string, len(ints))
+	for i := range ints {
+		strs[i] = strconv.Itoa(ints[i])
+	}
+	return strs
 }
