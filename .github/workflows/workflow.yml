@@ -1,0 +1,61 @@
+name: Build Docker Image
+run-name: Building Docker Image 🚀
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    name: Build with Go and Upload
+    runs-on: ubuntu-latest
+    env:
+      BINARY_NAME: dict-manager
+      BINARY_PATH: build/dict-manager
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Build with Go
+        run: |
+          mkdir -p build
+          export CGO_ENABLED=1
+          export GOOS=linux
+          export GOARCH=amd64
+          go get dict-manager
+          go build -ldflags="-s -w" -o $BINARY_PATH dict-manager
+          ls -lh $BINARY_PATH
+          file $BINARY_PATH
+
+      - name: Determine image version
+        id: set-version
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ secrets.REGISTRY_URL }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ secrets.REGISTRY_URL }}/${{ secrets.REGISTRY_NAME }}/dict-manager:latest
+            ${{ secrets.REGISTRY_URL }}/${{ secrets.REGISTRY_NAME }}/dict-manager:${{ steps.set-version.outputs.version }}
