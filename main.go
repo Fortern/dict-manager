@@ -237,6 +237,9 @@ func main() {
 
 	api := router.Group("/dicts")
 	{
+		api.GET("/ping", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"message": "pong", "version": "1.1"})
+		})
 		// 查询
 		api.GET("/dict/:dict_name", listWordsHandler)
 		// 添加新词

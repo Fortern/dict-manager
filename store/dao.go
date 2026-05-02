@@ -170,7 +170,7 @@ func UpsertCnWords(db *sql.DB, words []model.WordItem) ([]string, error) {
 				continue
 			}
 			if word.Weight <= 0 {
-				word.Weight = 10
+				word.Weight = 999
 			}
 			// 没有批处理？
 			if _, err := statement.Exec(text, reading, word.Weight, word.Category, now, now); err != nil {

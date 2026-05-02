@@ -8,6 +8,9 @@ import (
 )
 
 func CheckCnWord(word string, reading string) bool {
+	if len(word) == 0 || len(reading) == 0 {
+		return false
+	}
 	// 如果有不是中文的字符，返回false
 	for _, c := range word {
 		if !unicode.Is(unicode.Scripts["Han"], c) {
@@ -32,6 +35,9 @@ func CheckCnWord(word string, reading string) bool {
 }
 
 func CheckEnWord(word string, reading string) bool {
+	if len(word) == 0 || len(reading) == 0 {
+		return false
+	}
 	for _, c := range word {
 		if !unicode.IsLetter(c) && c != ' ' {
 			slog.Error("CheckCnWord: word string %s is not letter", "word", word)
@@ -39,7 +45,7 @@ func CheckEnWord(word string, reading string) bool {
 		}
 	}
 	for _, c := range reading {
-		if !unicode.IsLetter(c) && c != ' ' {
+		if !unicode.IsLetter(c) {
 			slog.Error("CheckCnWord: reading string %s is not letter", "reading", reading)
 			return false
 		}
@@ -48,5 +54,8 @@ func CheckEnWord(word string, reading string) bool {
 }
 
 func CheckPhrase(word string, reading string) bool {
+	if len(word) == 0 || len(reading) == 0 {
+		return false
+	}
 	return true
 }
