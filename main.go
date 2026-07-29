@@ -4,150 +4,174 @@ import (
 	"database/sql"
 	"dict-manager/model"
 	"dict-manager/store"
+	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func getDB(c *gin.Context) *sql.DB {
-	v, _ := c.Get("db")
-	return v.(*sql.DB)
+type apiServer struct {
+	db *sql.DB
 }
 
-func listWordsHandler(c *gin.Context) {
-	dictName := c.Param("dict_name")
-	dictName = model.GetDictName(dictName)
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Error("write json response", "msg", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func dictNameFromRequest(r *http.Request) string {
+	return model.GetDictName(r.PathValue("dict_name"))
+}
+
+func (s *apiServer) listWordsHandler(w http.ResponseWriter, r *http.Request) {
+	dictName := dictNameFromRequest(r)
 	if dictName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
-	category, err := strconv.Atoi(c.Query("category"))
+	category, err := strconv.Atoi(r.URL.Query().Get("category"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	db := getDB(c)
 	var errorWords any
 	if dictName == "cn_words" {
-		errorWords, err = store.GetCnWords(db, []int{category})
+		errorWords, err = store.GetCnWords(s.db, []int{category})
 	} else if dictName == "en_words" {
-		errorWords, err = store.GetEnWords(db, []int{category})
+		errorWords, err = store.GetEnWords(s.db, []int{category})
 	} else if dictName == "phrases" {
-		errorWords, err = store.GetPhrases(db, []int{category})
+		errorWords, err = store.GetPhrases(s.db, []int{category})
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
 	if err != nil {
 		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, errorWords)
+	writeJSON(w, http.StatusOK, errorWords)
 }
 
-func addWordsHandler(c *gin.Context) {
-	dictName := c.Param("dict_name")
-	dictName = model.GetDictName(dictName)
+func (s *apiServer) addWordsHandler(w http.ResponseWriter, r *http.Request) {
+	dictName := dictNameFromRequest(r)
 	if dictName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
 	var request []model.WordItem
-	if err := c.BindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	var errorWords []string
 	var err error
-	db := getDB(c)
 	if dictName == "cn_words" {
-		errorWords, err = store.UpsertCnWords(db, request)
+		errorWords, err = store.UpsertCnWords(s.db, request)
 	} else if dictName == "en_words" {
-		errorWords, err = store.UpsertEnWords(db, request)
+		errorWords, err = store.UpsertEnWords(s.db, request)
 	} else if dictName == "phrases" {
-		errorWords, err = store.UpsertPhrases(db, request)
+		errorWords, err = store.UpsertPhrases(s.db, request)
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
 	if err != nil {
 		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"error_words": errorWords})
-	return
+	writeJSON(w, http.StatusOK, map[string][]string{"error_words": errorWords})
 }
 
-func deleteWordHandler(c *gin.Context) {
-	dictName := c.Param("dict_name")
-	dictName = model.GetDictName(dictName)
+func (s *apiServer) deleteWordHandler(w http.ResponseWriter, r *http.Request) {
+	dictName := dictNameFromRequest(r)
 	if dictName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
-	id, err := strconv.Atoi(c.PostForm("id"))
+	reader := http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(reader)
+	_ = reader.Close()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	db := getDB(c)
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	id, err := strconv.Atoi(form.Get("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	if dictName == "cn_words" {
-		err = store.DeleteFromCnWordsById(db, id)
+		err = store.DeleteFromCnWordsById(s.db, id)
 	} else if dictName == "en_words" {
-		err = store.DeleteFromEnWordsById(db, id)
+		err = store.DeleteFromEnWordsById(s.db, id)
 	} else if dictName == "phrases" {
-		err = store.DeleteFromPhrasesById(db, id)
+		err = store.DeleteFromPhrasesById(s.db, id)
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
 	if err != nil {
 		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	c.Status(http.StatusOK)
+	w.WriteHeader(http.StatusOK)
 }
 
-func exportHandler(c *gin.Context) {
-	dictName := c.Param("dict_name")
-	dictName = model.GetDictName(dictName)
+func (s *apiServer) exportHandler(w http.ResponseWriter, r *http.Request) {
+	dictName := dictNameFromRequest(r)
 	if dictName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
-	db := getDB(c)
 	var lines string
 	var err error
 	var fileName string
 	if dictName == "cn_words" {
-		lines, err = exportCnWords(db)
+		lines, err = exportCnWords(s.db)
 		fileName = "common.dict.yaml"
 	} else if dictName == "en_words" {
-		lines, err = exportEnWords(db)
+		lines, err = exportEnWords(s.db)
 		fileName = "common_en.dict.yaml"
 	} else if dictName == "phrases" {
-		lines, err = exportPhrases(db)
+		lines, err = exportPhrases(s.db)
 		fileName = "custom_phrase.txt"
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path_param 'dict_name' is invalid"})
+		writeError(w, http.StatusBadRequest, errors.New("path_param 'dict_name' is invalid"))
 		return
 	}
 	if err != nil {
 		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	c.Header("Content-Type", "text/plain; charset=utf-8")
-	c.Header("Content-Disposition", "attachment; filename="+fileName)
-	c.String(http.StatusOK, lines)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename="+fileName)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.WriteString(w, lines); err != nil {
+		slog.Error("write export response", "msg", err)
+	}
 }
 
 func exportCnWords(db *sql.DB) (string, error) {
@@ -203,8 +227,41 @@ func exportPhrases(db *sql.DB) (string, error) {
 	return lines.String(), nil
 }
 
-func getCategoriesHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, model.GetCategories())
+func getCategoriesHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, model.GetCategories())
+}
+
+func (s *apiServer) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /dicts/ping", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"message": "pong", "version": "1.1"})
+	})
+	mux.HandleFunc("GET /dicts/dict/{dict_name}", s.listWordsHandler)
+	mux.HandleFunc("POST /dicts/dict/{dict_name}", s.addWordsHandler)
+	mux.HandleFunc("DELETE /dicts/dict/{dict_name}", s.deleteWordHandler)
+	mux.HandleFunc("GET /dicts/export/{dict_name}", s.exportHandler)
+	mux.HandleFunc("GET /dicts/category", getCategoriesHandler)
+	return requestLogger(recoverer(mux))
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		slog.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start))
+	})
+}
+
+func recoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if value := recover(); value != nil {
+				slog.Error("panic serving http request", "method", r.Method, "path", r.URL.Path, "error", value)
+				writeError(w, http.StatusInternalServerError, errors.New("internal server error"))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
@@ -225,35 +282,13 @@ func main() {
 		return
 	}
 
-	router := gin.Default()
-	router.Use(func(c *gin.Context) {
-		c.Set("db", db)
-		c.Next()
-	})
-
-	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "pong"})
-	})
-
-	api := router.Group("/dicts")
-	{
-		api.GET("/ping", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"message": "pong", "version": "1.1"})
-		})
-		// 查询
-		api.GET("/dict/:dict_name", listWordsHandler)
-		// 添加新词
-		api.POST("/dict/:dict_name", addWordsHandler)
-		// 删除词语
-		api.DELETE("/dict/:dict_name", deleteWordHandler)
-		// 导出文件
-		api.GET("/export/:dict_name", exportHandler)
-		// 类别列表
-		api.GET("/category", getCategoriesHandler)
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           (&apiServer{db: db}).routes(),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-
-	slog.Info("starting server on :8080")
-	if err := router.Run(); err != nil {
+	slog.Info("starting server", "addr", server.Addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("start server error", "msg", err)
 	}
 }

@@ -28,7 +28,7 @@ jobs:
           export GOOS=linux
           export GOARCH=amd64
           go get dict-manager
-          go build -ldflags="-s -w" -o $BINARY_PATH dict-manager
+          go build -trimpath -ldflags="-s -w" -o $BINARY_PATH dict-manager
           ls -lh $BINARY_PATH
           file $BINARY_PATH
 
