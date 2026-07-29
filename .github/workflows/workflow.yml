@@ -10,7 +10,6 @@ jobs:
     name: Build with Go and Upload
     runs-on: ubuntu-latest
     env:
-      BINARY_NAME: dict-manager
       BINARY_PATH: build/dict-manager
     steps:
       - name: Checkout repository
@@ -21,16 +20,37 @@ jobs:
         with:
           go-version: '1.26'
 
-      - name: Build with Go
+      - name: Install musl toolchain
+        run: |
+          sudo apt update
+          sudo apt install --yes --no-install-recommends musl-tools
+
+      - name: Build static Linux binary
+        env:
+          CC: musl-gcc
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
         run: |
           mkdir -p build
-          export CGO_ENABLED=1
-          export GOOS=linux
-          export GOARCH=amd64
           go get dict-manager
-          go build -trimpath -ldflags="-s -w" -o $BINARY_PATH dict-manager
-          ls -lh $BINARY_PATH
-          file $BINARY_PATH
+          go build \
+            -tags sqlite_omit_load_extension \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags='-s -buildid= -linkmode external -extldflags "-static"' \
+            -o "$BINARY_PATH" \
+            .
+          ls -lh "$BINARY_PATH"
+          file "$BINARY_PATH"
+          if readelf -l "$BINARY_PATH" | grep -q 'INTERP'; then
+            echo "::error::binary contains a dynamic program interpreter"
+            exit 1
+          fi
+          if readelf -d "$BINARY_PATH" | grep -q 'NEEDED'; then
+            echo "::error::binary contains dynamic library dependencies"
+            exit 1
+          fi
 
       - name: Determine image version
         id: set-version

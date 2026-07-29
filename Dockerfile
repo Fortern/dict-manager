@@ -1,10 +1,8 @@
-FROM debian:trixie-slim
+FROM scratch
 
-EXPOSE 8080/tcp
 WORKDIR /work
 
-COPY build/dict-manager /usr/local/bin/dict-manager
+COPY --chmod=0755 build/dict-manager /usr/local/bin/dict-manager
 
-RUN chmod +x /usr/local/bin/dict-manager
-
+EXPOSE 8080/tcp
 ENTRYPOINT ["/usr/local/bin/dict-manager"]
