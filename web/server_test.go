@@ -1,9 +1,11 @@
-package main
+package web_test
 
 import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"log/slog"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,8 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"dict-manager/model"
-	"dict-manager/store"
+	"dict-manager/dictionary"
+	"dict-manager/web"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -28,10 +32,13 @@ func newTestHandler(t *testing.T) http.Handler {
 			t.Errorf("close database: %v", err)
 		}
 	})
-	if err := store.InitSchema(db); err != nil {
+
+	catalog := dictionary.NewCatalog(db)
+	if err := catalog.InitSchema(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	return (&apiServer{db: db}).routes()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return web.New(catalog, logger).Handler()
 }
 
 func performRequest(handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -83,20 +90,24 @@ func TestEnglishWordLifecycle(t *testing.T) {
 	if addResponse.Code != http.StatusOK {
 		t.Fatalf("add status = %d; body = %s", addResponse.Code, addResponse.Body.String())
 	}
-	if addResponse.Header().Get("Content-Type") != "application/json" {
-		t.Errorf("unexpected content type: %q", addResponse.Header().Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(addResponse.Header().Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "application/json" {
+		t.Errorf("unexpected content type: %q", mediaType)
 	}
 
 	listResponse := performRequest(handler, http.MethodGet, "/dicts/dict/en_words?category=8", "")
 	if listResponse.Code != http.StatusOK {
 		t.Fatalf("list status = %d; body = %s", listResponse.Code, listResponse.Body.String())
 	}
-	var words []model.EnWord
-	if err := json.NewDecoder(listResponse.Body).Decode(&words); err != nil {
+	var entries []dictionary.Entry
+	if err := json.NewDecoder(listResponse.Body).Decode(&entries); err != nil {
 		t.Fatal(err)
 	}
-	if len(words) != 1 || words[0].Word != "Spigot" {
-		t.Fatalf("unexpected words: %#v", words)
+	if len(entries) != 1 || entries[0].Word != "Spigot" {
+		t.Fatalf("unexpected entries: %#v", entries)
 	}
 
 	exportResponse := performRequest(handler, http.MethodGet, "/dicts/export/en_words", "")
@@ -110,14 +121,13 @@ func TestEnglishWordLifecycle(t *testing.T) {
 		t.Errorf("unexpected export body: %q", exportResponse.Body.String())
 	}
 
-	form := url.Values{"id": {stringID(words[0].ID)}}.Encode()
+	form := url.Values{"id": {strconv.Itoa(entries[0].ID)}}.Encode()
 	request := httptest.NewRequest(http.MethodDelete, "/dicts/dict/en_words", strings.NewReader(form))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("delete status = %d; body = %s", response.Code, body)
+		t.Fatalf("delete status = %d; body = %s", response.Code, response.Body.String())
 	}
 
 	listResponse = performRequest(handler, http.MethodGet, "/dicts/dict/en_words?category=8", "")
@@ -126,18 +136,33 @@ func TestEnglishWordLifecycle(t *testing.T) {
 	}
 }
 
-func TestAddWordsRejectsInvalidBody(t *testing.T) {
+func TestUpsertValidation(t *testing.T) {
 	handler := newTestHandler(t)
 
-	for _, body := range []string{"", `[{"word":"","reading":"x","category":1}]`} {
-		response := performRequest(handler, http.MethodPost, "/dicts/dict/en_words", body)
-		// TODO Incorrect testing. 返回的Code应为200，且json中应当包含不为空的error_words字段。
-		if response.Code != http.StatusBadRequest {
-			t.Errorf("body %q: status = %d, want %d", body, response.Code, http.StatusBadRequest)
-		}
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "malformed JSON", body: "", wantStatus: http.StatusBadRequest, wantBody: `"error"`},
+		{
+			name:       "invalid word",
+			body:       `[{"word":"","reading":"x","category":1}]`,
+			wantStatus: http.StatusOK,
+			wantBody:   `"error_words":[""]`,
+		},
 	}
-}
 
-func stringID(id int) string {
-	return strconv.Itoa(id)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := performRequest(handler, http.MethodPost, "/dicts/dict/en_words", test.body)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), test.wantBody) {
+				t.Errorf("body %q does not contain %q", response.Body.String(), test.wantBody)
+			}
+		})
+	}
 }
